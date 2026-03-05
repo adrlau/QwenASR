@@ -28,10 +28,10 @@ qwen-asr -d qwen3-asr-0.6b -i audio.wav
 # Streaming mode
 qwen-asr -d qwen3-asr-0.6b -i audio.wav --stream
 
-# Live capture (macOS)
+# Live capture (macOS / Linux)
 qwen-asr -d qwen3-asr-0.6b --live --stream --device "BlackHole 2ch"
 
-# VAD live mode (macOS)
+# VAD live mode (macOS / Linux)
 qwen-asr -d qwen3-asr-0.6b --live --vad --device "BlackHole 2ch"
 
 # Forced alignment

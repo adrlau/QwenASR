@@ -250,7 +250,7 @@ Models can be downloaded via the built-in download subcommand:
 | `--device <name>` | Input device name for live capture | system default |
 | `--list-devices` | List available audio input devices and exit | — |
 | `--vad` | Live VAD mode: detect speech segments and transcribe each | off |
-| `-t <n>` | Number of threads | all CPUs |
+| `-t <n>` | Number of threads (clamped to available CPUs) | all CPUs |
 | `-S <secs>` | Segment target seconds (0 = full-audio decode) | 0 |
 | `-W <secs>` | Silence search window for segment splits | 3.0 |
 | `--stream` | Streaming mode with chunked rollback | off |
@@ -355,7 +355,7 @@ Options for `bench/run.sh`:
 | `--samples-dir DIR` | Audio samples directory | `bench/samples` |
 | `--label NAME` | Label for this run | git short rev or timestamp |
 | `--modes LIST` | Comma-separated modes | `offline,segmented,streaming` |
-| `--threads N` | Thread count | all CPUs |
+| `--threads N` | Thread count (clamped to available CPUs) | all CPUs |
 | `--runs N` | Repeat each test N times, keep best | 1 |
 
 To compare against the C reference:

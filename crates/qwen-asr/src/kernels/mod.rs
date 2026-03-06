@@ -174,8 +174,6 @@ pub fn verbose() -> i32 {
 
 use std::sync::{Mutex, Condvar, Arc, Once};
 
-const MAX_THREADS: usize = 16;
-
 struct ThreadPool {
     state: Mutex<ThreadPoolState>,
     work_cv: Condvar,
@@ -286,7 +284,7 @@ fn ensure_workers(pool: &Arc<ThreadPool>, n_threads: usize) {
 static mut THREAD_POOL_THREADS: usize = 1;
 
 pub fn set_threads(n: usize) {
-    let n = n.max(1).min(MAX_THREADS);
+    let n = n.max(1).min(get_num_cpus().max(1));
     unsafe { THREAD_POOL_THREADS = n; }
     if n > 1 {
         let pool = get_pool();

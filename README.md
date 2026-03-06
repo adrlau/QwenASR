@@ -194,9 +194,9 @@ Process audio in 2-second chunks with incremental output. Uses prefix rollback f
 ./target/release/qwen-asr -d qwen3-asr-0.6b -i audio.wav --stream --stream-chunk-sec 4
 ```
 
-### Live Capture (macOS)
+### Live Capture (macOS / Linux)
 
-Capture audio from an input device in real time. Requires an audio input device (such as BlackHole for system audio capture or a microphone):
+Capture audio from an input device in real time. Requires an audio input device (such as BlackHole for system audio capture on macOS or a microphone):
 
 ```bash
 # Default input device, segmented mode
@@ -209,7 +209,7 @@ Capture audio from an input device in real time. Requires an audio input device 
 ./target/release/qwen-asr --list-devices
 ```
 
-### VAD Live Mode (macOS)
+### VAD Live Mode (macOS / Linux)
 
 Voice Activity Detection mode captures audio in real time, detects speech segments using energy-based VAD, and transcribes each segment independently. Useful for conversations with natural pauses:
 
@@ -246,7 +246,7 @@ Models can be downloaded via the built-in download subcommand:
 | `-d <dir>` | Model directory (required) | — |
 | `-i <file>` | Input WAV file (16-bit PCM, any sample rate) | — |
 | `--stdin` | Read audio from stdin (WAV or raw s16le 16kHz mono) | off |
-| `--live` | Capture from audio input device in real time (macOS) | off |
+| `--live` | Capture from audio input device in real time (macOS / Linux) | off |
 | `--device <name>` | Input device name for live capture | system default |
 | `--list-devices` | List available audio input devices and exit | — |
 | `--vad` | Live VAD mode: detect speech segments and transcribe each | off |

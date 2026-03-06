@@ -163,7 +163,7 @@ fn build_stream_i16(
         .build_input_stream(
             config,
             move |data: &[i16], _| {
-                let mono = interleaved_to_mono(data, channels, |s| s as f32 / 32768.0);
+                let mono = interleaved_to_mono(data, channels, i16_to_f32);
                 let _ = tx.send(mono);
             },
             err_fn,
@@ -209,6 +209,14 @@ where
     out
 }
 
+fn i16_to_f32(s: i16) -> f32 {
+    if s >= 0 {
+        s as f32 / 32767.0
+    } else {
+        s as f32 / 32768.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::interleaved_to_mono;
@@ -223,9 +231,9 @@ mod tests {
     #[test]
     fn mono_i16_is_scaled_to_f32() {
         let input = [i16::MIN, 0_i16, i16::MAX];
-        let mono = interleaved_to_mono(&input, 1, |s| s as f32 / 32768.0);
+        let mono = interleaved_to_mono(&input, 1, super::i16_to_f32);
         assert_eq!(mono[0], -1.0);
         assert_eq!(mono[1], 0.0);
-        assert!(mono[2] < 1.0);
+        assert_eq!(mono[2], 1.0);
     }
 }

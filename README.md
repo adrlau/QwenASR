@@ -242,7 +242,7 @@ Models can be downloaded via the built-in download subcommand:
 ./target/release/qwen-asr download mlx-community/Qwen3-ASR-0.6B-4bit
 ```
 
-By default, downloaded models are placed under a platform-specific cache directory in a `qwen-asr/models/<model-name>/` subfolder (`$XDG_CACHE_HOME/qwen-asr/models` on Linux, `~/Library/Caches/qwen-asr/models` on macOS).
+By default, downloaded models are placed under a platform-specific data directory in a `qwen-asr/models/<model-name>/` subfolder (`$XDG_DATA_HOME/qwen-asr/models` on Linux, `~/Library/Application Support/qwen-asr/models` on macOS). The directory is created automatically if it does not exist.
 
 ### All Options
 

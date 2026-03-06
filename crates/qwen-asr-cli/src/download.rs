@@ -64,49 +64,58 @@ fn home_dir() -> Option<PathBuf> {
 }
 
 pub fn default_models_root() -> PathBuf {
-    #[cfg(target_os = "linux")]
-    {
-        if let Some(xdg_data_home) = std::env::var_os("XDG_DATA_HOME") {
-            return PathBuf::from(xdg_data_home).join("qwen-asr").join("models");
+    let root = {
+        #[cfg(target_os = "linux")]
+        {
+            if let Some(xdg_data_home) = std::env::var_os("XDG_DATA_HOME") {
+                PathBuf::from(xdg_data_home).join("qwen-asr").join("models")
+            } else if let Some(home) = home_dir() {
+                home.join(".local").join("share").join("qwen-asr").join("models")
+            } else {
+                PathBuf::from(".").join(".qwen-asr").join("models")
+            }
         }
-        if let Some(home) = home_dir() {
-            return home
-                .join(".local")
-                .join("share")
-                .join("qwen-asr")
-                .join("models");
-        }
-    }
 
-    #[cfg(target_os = "macos")]
-    {
-        if let Some(home) = home_dir() {
-            return home
-                .join("Library")
-                .join("Application Support")
-                .join("qwen-asr")
-                .join("models");
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(home) = home_dir() {
+                home.join("Library")
+                    .join("Application Support")
+                    .join("qwen-asr")
+                    .join("models")
+            } else {
+                PathBuf::from(".").join(".qwen-asr").join("models")
+            }
         }
-    }
 
-    #[cfg(target_os = "windows")]
-    {
-        if let Some(appdata) = std::env::var_os("APPDATA") {
-            return PathBuf::from(appdata).join("qwen-asr").join("models");
+        #[cfg(target_os = "windows")]
+        {
+            if let Some(appdata) = std::env::var_os("APPDATA") {
+                PathBuf::from(appdata).join("qwen-asr").join("models")
+            } else if let Some(home) = home_dir() {
+                home.join("AppData")
+                    .join("Roaming")
+                    .join("qwen-asr")
+                    .join("models")
+            } else {
+                PathBuf::from(".").join(".qwen-asr").join("models")
+            }
         }
-        if let Some(home) = home_dir() {
-            return home
-                .join("AppData")
-                .join("Roaming")
-                .join("qwen-asr")
-                .join("models");
-        }
-    }
 
-    home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".qwen-asr")
-        .join("models")
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+        {
+            home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".qwen-asr")
+                .join("models")
+        }
+    };
+
+    // Ensure the directory exists so callers can use it immediately.
+    if let Err(e) = fs::create_dir_all(&root) {
+        eprintln!("Warning: could not create models directory {}: {}", root.display(), e);
+    }
+    root
 }
 
 fn sanitize_model_dir_name(name: &str) -> String {

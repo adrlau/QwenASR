@@ -45,7 +45,7 @@ pip install huggingface_hub
 huggingface_hub download Qwen/Qwen3-ASR-0.6B --local-dir qwen3-asr-0.6b
 
 # Download the 0.6B forced-aligner model (~1.3 GB)
-huggingface_hub download Qwen/Qwen3-ASR-0.6B-Aligner --local-dir qwen3-aligner-0.6b
+huggingface_hub download Qwen/Qwen3-ASR-ForcedAligner-0.6B --local-dir qwen3-aligner-0.6b
 ```
 
 ## Usage
@@ -144,7 +144,7 @@ for r in &results {
 CLI:
 
 ```bash
-qwen-asr -d qwen3-aligner-0.6b -i audio.wav --align "Hello world" --align-language English
+qwen-asr -m qwen3-aligner-0.6b -i audio.wav --align "Hello world" --align-language English
 ```
 
 Each `AlignResult` contains the word text, `start_ms`, and `end_ms` timestamps.

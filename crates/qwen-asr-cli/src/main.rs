@@ -1,10 +1,5 @@
 mod download;
-#[cfg(target_os = "linux")]
-mod linux_capture;
-#[cfg(target_os = "macos")]
 mod live_capture;
-#[cfg(target_os = "linux")]
-use linux_capture as live_capture;
 
 use config::*;
 use context::QwenCtx;
@@ -480,7 +475,7 @@ fn main() {
 }
 
 // ========================================================================
-// Live Capture Loop (macOS / Linux)
+// Live Capture Loop (cross-platform)
 // ========================================================================
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -508,14 +503,6 @@ fn run_live_capture(
             }
             None => {
                 eprintln!("Error: No input device matching '{}'", name);
-                #[cfg(target_os = "macos")]
-                if name.to_lowercase().contains("blackhole") {
-                    eprintln!();
-                    eprintln!("BlackHole does not appear to be installed.");
-                    eprintln!("Install it with: brew install blackhole-2ch");
-                    eprintln!("Then set it up as a Multi-Output Device in Audio MIDI Setup.");
-                    eprintln!("See: https://github.com/ExistentialAudio/BlackHole");
-                }
                 eprintln!();
                 live_capture::print_devices();
                 std::process::exit(1);

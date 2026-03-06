@@ -4,6 +4,9 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
+const SAFETENSORS_EXT: &str = ".safetensors";
+const SAFETENSORS_INDEX_EXT: &str = ".safetensors.index.json";
+
 // ========================================================================
 // Model Registry
 // ========================================================================
@@ -141,11 +144,11 @@ fn looks_like_path(value: &str) -> bool {
 }
 
 pub fn is_hf_repo_id(value: &str) -> bool {
-    if value.starts_with('/')
+    if value.starts_with("/")
         || value.starts_with("./")
         || value.starts_with("../")
-        || value.starts_with('~')
-        || value.contains('\\')
+        || value.starts_with("~")
+        || value.contains("\\")
     {
         return false;
     }
@@ -190,6 +193,12 @@ fn hf_model_api_url(repo: &str) -> String {
 }
 
 fn list_hf_repo_files(repo: &str) -> Result<Vec<String>, String> {
+    if !is_hf_repo_id(repo) {
+        return Err(format!(
+            "Invalid Hugging Face repo ID '{}'. Expected format: owner/repo-name",
+            repo
+        ));
+    }
     let resp = ureq::get(&hf_model_api_url(repo)).call().map_err(|e| {
         format!(
             "Failed to fetch Hugging Face repo metadata for '{}': {}",
@@ -236,7 +245,7 @@ fn select_repo_model_files(repo_files: &[String]) -> Vec<String> {
 
     let mut wanted: Vec<String> = repo_files
         .iter()
-        .filter(|name| name.ends_with(".safetensors") || name.ends_with(".safetensors.index.json"))
+        .filter(|name| name.ends_with(SAFETENSORS_EXT) || name.ends_with(SAFETENSORS_INDEX_EXT))
         .cloned()
         .collect();
 
@@ -538,7 +547,10 @@ pub fn handle_download_command(args: &[String]) -> bool {
             }
         }
     } else {
-        eprintln!("Unknown model or Hugging Face repo: '{}'\n", name);
+        eprintln!(
+            "Invalid model name or Hugging Face repo ID format: '{}'\n",
+            name
+        );
         list_models();
         std::process::exit(1);
     }

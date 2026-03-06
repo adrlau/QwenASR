@@ -1,5 +1,6 @@
 //! Model download from HuggingFace with progress display.
 
+use std::env;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -64,67 +65,74 @@ fn home_dir() -> Option<PathBuf> {
 }
 
 pub fn default_models_root() -> PathBuf {
-    let root = {
-        #[cfg(target_os = "linux")]
-        {
-            if let Some(xdg_data_home) = std::env::var_os("XDG_DATA_HOME") {
-                PathBuf::from(xdg_data_home).join("qwen-asr").join("models")
-            } else if let Some(home) = home_dir() {
-                home.join(".local").join("share").join("qwen-asr").join("models")
-            } else {
-                PathBuf::from(".").join(".qwen-asr").join("models")
+    let root = match env::var("XDG_DATA_HOME") {
+        Ok(val) => Path::new(&val).join("qwen-asr").join("models"),
+        Err(_) => {
+            #[cfg(target_os = "linux")]
+            {
+                if let Some(home) = home_dir() {
+                    home.join(".local")
+                        .join("share")
+                        .join("qwen-asr")
+                        .join("models")
+                } else {
+                    PathBuf::from(".").join(".qwen-asr").join("models")
+                }
             }
-        }
 
-        #[cfg(target_os = "macos")]
-        {
-            if let Some(home) = home_dir() {
-                home.join("Library")
-                    .join("Application Support")
-                    .join("qwen-asr")
+            #[cfg(target_os = "macos")]
+            {
+                if let Some(home) = home_dir() {
+                    home.join("Library")
+                        .join("Application Support")
+                        .join("qwen-asr")
+                        .join("models")
+                } else {
+                    PathBuf::from(".").join(".qwen-asr").join("models")
+                }
+            }
+
+            #[cfg(target_os = "windows")]
+            {
+                if let Some(appdata) = std::env::var_os("APPDATA") {
+                    PathBuf::from(appdata).join("qwen-asr").join("models")
+                } else if let Some(home) = home_dir() {
+                    home.join("AppData")
+                        .join("Roaming")
+                        .join("qwen-asr")
+                        .join("models")
+                } else {
+                    PathBuf::from(".").join(".qwen-asr").join("models")
+                }
+            }
+
+            #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+            {
+                home_dir()
+                    .unwrap_or_else(|| PathBuf::from("."))
+                    .join(".qwen-asr")
                     .join("models")
-            } else {
-                PathBuf::from(".").join(".qwen-asr").join("models")
             }
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            if let Some(appdata) = std::env::var_os("APPDATA") {
-                PathBuf::from(appdata).join("qwen-asr").join("models")
-            } else if let Some(home) = home_dir() {
-                home.join("AppData")
-                    .join("Roaming")
-                    .join("qwen-asr")
-                    .join("models")
-            } else {
-                PathBuf::from(".").join(".qwen-asr").join("models")
-            }
-        }
-
-        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-        {
-            home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".qwen-asr")
-                .join("models")
         }
     };
 
     // Ensure the directory exists so callers can use it immediately.
     if let Err(e) = fs::create_dir_all(&root) {
-        eprintln!("Warning: could not create models directory {}: {}", root.display(), e);
+        eprintln!(
+            "Warning: could not create models directory {}: {}",
+            root.display(),
+            e
+        );
     }
     root
 }
 
 fn sanitize_model_dir_name(name: &str) -> String {
     let trimmed = name.trim().trim_end_matches('/');
-    let segment = trimmed.rsplit('/').next().unwrap_or(trimmed);
-    let cleaned: String = segment
+    let cleaned: String = trimmed
         .chars()
         .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '/' {
                 c
             } else {
                 '-'
@@ -138,8 +146,12 @@ fn sanitize_model_dir_name(name: &str) -> String {
     }
 }
 
-pub fn default_model_dir_for(model_id: &str) -> PathBuf {
-    default_models_root().join(sanitize_model_dir_name(model_id))
+pub fn resolve_model_dir(model_input: &str) -> PathBuf {
+    if looks_like_path(model_input) {
+        PathBuf::from(model_input)
+    } else {
+        default_models_root().join(sanitize_model_dir_name(model_input))
+    }
 }
 
 fn looks_like_path(value: &str) -> bool {
@@ -147,8 +159,6 @@ fn looks_like_path(value: &str) -> bool {
     p.is_absolute()
         || value.starts_with('.')
         || value.starts_with('~')
-        || value.contains(std::path::MAIN_SEPARATOR)
-        || value.contains('\\')
         || (cfg!(windows) && value.contains(':'))
 }
 
@@ -167,14 +177,6 @@ pub fn is_hf_repo_id(value: &str) -> bool {
     parts.next().is_none() && !owner.is_empty() && !name.is_empty()
 }
 
-pub fn resolve_model_dir(model_input: &str) -> PathBuf {
-    if Path::new(model_input).exists() || looks_like_path(model_input) {
-        PathBuf::from(model_input)
-    } else {
-        default_model_dir_for(model_input)
-    }
-}
-
 // ========================================================================
 // List Models
 // ========================================================================
@@ -186,7 +188,7 @@ pub fn list_models() {
     }
     eprintln!();
     eprintln!("Usage: qwen-asr download <model-name|hf-repo> [--output <dir>]");
-    eprintln!("Default output: {}", default_models_root().display());
+    eprintln!("Default output root: {}", default_models_root().display());
 }
 
 // ========================================================================
@@ -395,8 +397,8 @@ fn download_file(url: &str, dest: &Path) -> Result<(), String> {
 
 /// Download all files for a model.
 pub fn download_model(model: &ModelInfo, output_dir: &str) -> Result<(), String> {
-    let dir = Path::new(output_dir);
-    fs::create_dir_all(dir)
+    let dir = PathBuf::from(output_dir);
+    fs::create_dir_all(&dir)
         .map_err(|e| format!("Cannot create directory {}: {}", output_dir, e))?;
 
     let total_files = model.files.len();
@@ -422,8 +424,8 @@ pub fn download_model(model: &ModelInfo, output_dir: &str) -> Result<(), String>
 }
 
 pub fn download_repo_model(repo: &str, output_dir: &str) -> Result<(), String> {
-    let dir = Path::new(output_dir);
-    fs::create_dir_all(dir)
+    let dir = PathBuf::from(output_dir);
+    fs::create_dir_all(&dir)
         .map_err(|e| format!("Cannot create directory {}: {}", output_dir, e))?;
 
     let repo_files = list_hf_repo_files(repo)?;
@@ -519,6 +521,7 @@ pub fn handle_download_command(args: &[String]) -> bool {
                 eprintln!("  -h, --help       Show this help");
                 return true;
             }
+
             other => {
                 if other.starts_with('-') {
                     eprintln!("Unknown option for download: {}", other);
@@ -536,9 +539,18 @@ pub fn handle_download_command(args: &[String]) -> bool {
     }
 
     let name = model_name.unwrap();
+    if looks_like_path(&name) {
+        eprintln!(
+            "Error: '{}' appears to be a local path. The download command expects a model name or Hugging Face repository ID.\n",
+            name
+        );
+        eprintln!("To download a model to a specific directory, use:\n  qwen-asr download <model-name> --output /your/path/\n");
+        return true;
+    }
+
     if let Some(model) = find_model(&name) {
-        let dir =
-            output_dir.unwrap_or_else(|| default_model_dir_for(model.name).display().to_string());
+        let path = resolve_model_dir(model.name);
+        let dir = output_dir.unwrap_or_else(|| path.to_string_lossy().to_string());
         match download_model(model, &dir) {
             Ok(()) => {}
             Err(e) => {
@@ -547,7 +559,8 @@ pub fn handle_download_command(args: &[String]) -> bool {
             }
         }
     } else if is_hf_repo_id(&name) {
-        let dir = output_dir.unwrap_or_else(|| default_model_dir_for(&name).display().to_string());
+        let path = resolve_model_dir(&name);
+        let dir = output_dir.unwrap_or_else(|| path.to_string_lossy().to_string());
         match download_repo_model(&name, &dir) {
             Ok(()) => {}
             Err(e) => {

@@ -2,7 +2,10 @@
 
 use std::fs;
 use std::io::{self, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+const SAFETENSORS_EXT: &str = ".safetensors";
+const SAFETENSORS_INDEX_EXT: &str = ".safetensors.index.json";
 
 // ========================================================================
 // Model Registry
@@ -53,6 +56,116 @@ pub fn find_model(name: &str) -> Option<&'static ModelInfo> {
     KNOWN_MODELS.iter().find(|m| m.name == name_lower)
 }
 
+fn home_dir() -> Option<PathBuf> {
+    if let Some(home) = std::env::var_os("HOME") {
+        return Some(PathBuf::from(home));
+    }
+    std::env::var_os("USERPROFILE").map(PathBuf::from)
+}
+
+pub fn default_models_root() -> PathBuf {
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(xdg_data_home) = std::env::var_os("XDG_DATA_HOME") {
+            return PathBuf::from(xdg_data_home).join("qwen-asr").join("models");
+        }
+        if let Some(home) = home_dir() {
+            return home
+                .join(".local")
+                .join("share")
+                .join("qwen-asr")
+                .join("models");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(home) = home_dir() {
+            return home
+                .join("Library")
+                .join("Application Support")
+                .join("qwen-asr")
+                .join("models");
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            return PathBuf::from(appdata).join("qwen-asr").join("models");
+        }
+        if let Some(home) = home_dir() {
+            return home
+                .join("AppData")
+                .join("Roaming")
+                .join("qwen-asr")
+                .join("models");
+        }
+    }
+
+    home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".qwen-asr")
+        .join("models")
+}
+
+fn sanitize_model_dir_name(name: &str) -> String {
+    let trimmed = name.trim().trim_end_matches('/');
+    let segment = trimmed.rsplit('/').next().unwrap_or(trimmed);
+    let cleaned: String = segment
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    if cleaned.is_empty() {
+        "model".to_string()
+    } else {
+        cleaned
+    }
+}
+
+pub fn default_model_dir_for(model_id: &str) -> PathBuf {
+    default_models_root().join(sanitize_model_dir_name(model_id))
+}
+
+fn looks_like_path(value: &str) -> bool {
+    let p = Path::new(value);
+    p.is_absolute()
+        || value.starts_with('.')
+        || value.starts_with('~')
+        || value.contains(std::path::MAIN_SEPARATOR)
+        || value.contains('\\')
+        || (cfg!(windows) && value.contains(':'))
+}
+
+pub fn is_hf_repo_id(value: &str) -> bool {
+    if value.starts_with("/")
+        || value.starts_with("./")
+        || value.starts_with("../")
+        || value.starts_with("~")
+        || value.contains("\\")
+    {
+        return false;
+    }
+    let mut parts = value.split('/');
+    let owner = parts.next().unwrap_or("");
+    let name = parts.next().unwrap_or("");
+    parts.next().is_none() && !owner.is_empty() && !name.is_empty()
+}
+
+pub fn resolve_model_dir(model_input: &str) -> PathBuf {
+    if Path::new(model_input).exists() || looks_like_path(model_input) {
+        PathBuf::from(model_input)
+    } else {
+        default_model_dir_for(model_input)
+    }
+}
+
 // ========================================================================
 // List Models
 // ========================================================================
@@ -63,7 +176,8 @@ pub fn list_models() {
         eprintln!("  {:<24} {}", m.name, m.description);
     }
     eprintln!();
-    eprintln!("Usage: qwen-asr download <model-name> [--output <dir>]");
+    eprintln!("Usage: qwen-asr download <model-name|hf-repo> [--output <dir>]");
+    eprintln!("Default output: {}", default_models_root().display());
 }
 
 // ========================================================================
@@ -71,10 +185,79 @@ pub fn list_models() {
 // ========================================================================
 
 fn hf_url(repo: &str, file: &str) -> String {
-    format!(
-        "https://huggingface.co/{}/resolve/main/{}",
-        repo, file
-    )
+    format!("https://huggingface.co/{}/resolve/main/{}", repo, file)
+}
+
+fn hf_model_api_url(repo: &str) -> String {
+    format!("https://huggingface.co/api/models/{}", repo)
+}
+
+fn list_hf_repo_files(repo: &str) -> Result<Vec<String>, String> {
+    if !is_hf_repo_id(repo) {
+        return Err(format!(
+            "Invalid Hugging Face repo ID '{}'. Expected format: owner/repo-name",
+            repo
+        ));
+    }
+    let resp = ureq::get(&hf_model_api_url(repo)).call().map_err(|e| {
+        format!(
+            "Failed to fetch Hugging Face repo metadata for '{}': {}",
+            repo, e
+        )
+    })?;
+    let body = resp
+        .into_string()
+        .map_err(|e| format!("Failed to read Hugging Face response: {}", e))?;
+
+    let mut files = Vec::new();
+    for part in body.split("\"rfilename\":\"").skip(1) {
+        if let Some((raw, _)) = part.split_once('"') {
+            let name = raw.replace("\\/", "/");
+            if !name.is_empty() {
+                files.push(name);
+            }
+        }
+    }
+    files.sort();
+    files.dedup();
+
+    if files.is_empty() {
+        Err(format!(
+            "No files found for Hugging Face repo '{}'. Check that the repo exists and is public.",
+            repo
+        ))
+    } else {
+        Ok(files)
+    }
+}
+
+fn select_repo_model_files(repo_files: &[String]) -> Vec<String> {
+    const COMMON_EXTRA_FILES: &[&str] = &[
+        "vocab.json",
+        "merges.txt",
+        "tokenizer.json",
+        "tokenizer.model",
+        "preprocessor_config.json",
+        "config.json",
+        "generation_config.json",
+        "special_tokens_map.json",
+    ];
+
+    let mut wanted: Vec<String> = repo_files
+        .iter()
+        .filter(|name| name.ends_with(SAFETENSORS_EXT) || name.ends_with(SAFETENSORS_INDEX_EXT))
+        .cloned()
+        .collect();
+
+    for name in COMMON_EXTRA_FILES {
+        if repo_files.iter().any(|n| n == name) {
+            wanted.push((*name).to_string());
+        }
+    }
+
+    wanted.sort();
+    wanted.dedup();
+    wanted
 }
 
 /// Format bytes as human-readable size.
@@ -101,9 +284,7 @@ fn download_file(url: &str, dest: &Path) -> Result<(), String> {
             .unwrap_or_else(|| "part".to_string()),
     );
     if part_path.exists() {
-        start_byte = fs::metadata(&part_path)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        start_byte = fs::metadata(&part_path).map(|m| m.len()).unwrap_or(0);
     }
 
     // Already fully downloaded?
@@ -115,13 +296,12 @@ fn download_file(url: &str, dest: &Path) -> Result<(), String> {
     let mut req = ureq::get(url);
     if start_byte > 0 {
         req = req.set("Range", &format!("bytes={}-", start_byte));
-        eprint!(
-            "  Resuming from {} ... ",
-            format_bytes(start_byte)
-        );
+        eprint!("  Resuming from {} ... ", format_bytes(start_byte));
     }
 
-    let resp = req.call().map_err(|e| format!("HTTP request failed: {}", e))?;
+    let resp = req
+        .call()
+        .map_err(|e| format!("HTTP request failed: {}", e))?;
 
     // Parse content length
     let total_bytes = if start_byte > 0 {
@@ -149,7 +329,9 @@ fn download_file(url: &str, dest: &Path) -> Result<(), String> {
     let start_time = std::time::Instant::now();
 
     loop {
-        let n = reader.read(&mut buf).map_err(|e| format!("Read error: {}", e))?;
+        let n = reader
+            .read(&mut buf)
+            .map_err(|e| format!("Read error: {}", e))?;
         if n == 0 {
             break;
         }
@@ -190,8 +372,14 @@ fn download_file(url: &str, dest: &Path) -> Result<(), String> {
     eprintln!(); // newline after progress
 
     // Rename .part to final destination
-    fs::rename(&part_path, dest)
-        .map_err(|e| format!("Cannot rename {} → {}: {}", part_path.display(), dest.display(), e))?;
+    fs::rename(&part_path, dest).map_err(|e| {
+        format!(
+            "Cannot rename {} → {}: {}",
+            part_path.display(),
+            dest.display(),
+            e
+        )
+    })?;
 
     Ok(())
 }
@@ -221,6 +409,46 @@ pub fn download_model(model: &ModelInfo, output_dir: &str) -> Result<(), String>
     }
 
     eprintln!("\n✓ Model '{}' downloaded to {}", model.name, output_dir);
+    Ok(())
+}
+
+pub fn download_repo_model(repo: &str, output_dir: &str) -> Result<(), String> {
+    let dir = Path::new(output_dir);
+    fs::create_dir_all(dir)
+        .map_err(|e| format!("Cannot create directory {}: {}", output_dir, e))?;
+
+    let repo_files = list_hf_repo_files(repo)?;
+    let files = select_repo_model_files(&repo_files);
+    if files.is_empty() {
+        return Err(format!(
+            "No model files found in '{}'. Expected safetensors and tokenizer files.",
+            repo
+        ));
+    }
+
+    let total_files = files.len();
+    for (i, file_name) in files.iter().enumerate() {
+        let dest = dir.join(file_name);
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Cannot create directory {}: {}", parent.display(), e))?;
+        }
+        if dest.exists() {
+            eprintln!(
+                "[{}/{}] {} — already exists, skipping",
+                i + 1,
+                total_files,
+                file_name
+            );
+            continue;
+        }
+
+        let url = hf_url(repo, file_name);
+        eprintln!("[{}/{}] Downloading {} ...", i + 1, total_files, file_name);
+        download_file(&url, &dest)?;
+    }
+
+    eprintln!("\n✓ Model '{}' downloaded to {}", repo, output_dir);
     Ok(())
 }
 
@@ -270,10 +498,15 @@ pub fn handle_download_command(args: &[String]) -> bool {
                 output_dir = args.get(i).cloned();
             }
             "-h" | "--help" => {
-                eprintln!("Usage: qwen-asr download [--list] [<model-name>] [--output <dir>]\n");
+                eprintln!(
+                    "Usage: qwen-asr download [--list] [<model-name|hf-repo>] [--output <dir>]\n"
+                );
                 eprintln!("Options:");
                 eprintln!("  --list, -l       List available models");
-                eprintln!("  --output, -o     Download directory (default: ./<model-name>/)");
+                eprintln!(
+                    "  --output, -o     Download directory (default: {}/<model-name>/)",
+                    default_models_root().display()
+                );
                 eprintln!("  -h, --help       Show this help");
                 return true;
             }
@@ -294,23 +527,71 @@ pub fn handle_download_command(args: &[String]) -> bool {
     }
 
     let name = model_name.unwrap();
-    let model = match find_model(&name) {
-        Some(m) => m,
-        None => {
-            eprintln!("Unknown model: '{}'\n", name);
-            list_models();
-            std::process::exit(1);
+    if let Some(model) = find_model(&name) {
+        let dir =
+            output_dir.unwrap_or_else(|| default_model_dir_for(model.name).display().to_string());
+        match download_model(model, &dir) {
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!("\nError: {}", e);
+                std::process::exit(1);
+            }
         }
-    };
-
-    let dir = output_dir.unwrap_or_else(|| name.clone());
-    match download_model(model, &dir) {
-        Ok(()) => {}
-        Err(e) => {
-            eprintln!("\nError: {}", e);
-            std::process::exit(1);
+    } else if is_hf_repo_id(&name) {
+        let dir = output_dir.unwrap_or_else(|| default_model_dir_for(&name).display().to_string());
+        match download_repo_model(&name, &dir) {
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!("\nError: {}", e);
+                std::process::exit(1);
+            }
         }
+    } else {
+        eprintln!(
+            "Invalid model name or Hugging Face repo ID format: '{}'\n",
+            name
+        );
+        list_models();
+        std::process::exit(1);
     }
 
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_named_model_uses_default_root() {
+        let dir = resolve_model_dir("qwen3-asr-0.6b");
+        assert!(dir.ends_with("qwen3-asr-0.6b"));
+    }
+
+    #[test]
+    fn repo_id_detection() {
+        assert!(is_hf_repo_id("mlx-community/Qwen3-ASR-0.6B-4bit"));
+        assert!(!is_hf_repo_id("./models/qwen"));
+        assert!(!is_hf_repo_id("/tmp/qwen"));
+        assert!(!is_hf_repo_id("qwen3-asr-0.6b"));
+    }
+
+    #[test]
+    fn repo_file_selection_prefers_model_and_tokenizer() {
+        let files = vec![
+            "README.md".to_string(),
+            "model.safetensors".to_string(),
+            "tokenizer.json".to_string(),
+            "config.json".to_string(),
+        ];
+        let selected = select_repo_model_files(&files);
+        assert_eq!(
+            selected,
+            vec![
+                "config.json".to_string(),
+                "model.safetensors".to_string(),
+                "tokenizer.json".to_string()
+            ]
+        );
+    }
 }

@@ -17,25 +17,26 @@ vDSP/Accelerate is auto-enabled on macOS via default features.
 
 ```bash
 qwen-asr download qwen3-asr-0.6b
+qwen-asr download mlx-community/Qwen3-ASR-0.6B-4bit
 ```
 
 ## Usage
 
 ```bash
 # Transcribe a file
-qwen-asr -d qwen3-asr-0.6b -i audio.wav
+qwen-asr -m qwen3-asr-0.6b -i audio.wav
 
 # Streaming mode
-qwen-asr -d qwen3-asr-0.6b -i audio.wav --stream
+qwen-asr -m qwen3-asr-0.6b -i audio.wav --stream
 
 # Live capture (macOS / Linux)
-qwen-asr -d qwen3-asr-0.6b --live --stream --device "BlackHole 2ch"
+qwen-asr -m qwen3-asr-0.6b --live --stream --device "BlackHole 2ch"
 
 # VAD live mode (macOS / Linux)
-qwen-asr -d qwen3-asr-0.6b --live --vad --device "BlackHole 2ch"
+qwen-asr -m qwen3-asr-0.6b --live --vad --device "BlackHole 2ch"
 
 # Forced alignment
-qwen-asr -d qwen3-aligner-0.6b -i audio.wav --align "Hello world"
+qwen-asr -m qwen3-aligner-0.6b -i audio.wav --align "Hello world"
 
 # All options
 qwen-asr -h

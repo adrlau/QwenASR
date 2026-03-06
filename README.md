@@ -155,23 +155,23 @@ public class QAsrEngine {
 ## Usage
 
 ```
-qwen-asr -d <model_dir> (-i <input.wav> | --stdin | --live) [options]
+qwen-asr -m <model|model_dir> (-i <input.wav> | --stdin | --live) [options]
 ```
 
 ### Basic Examples
 
 ```bash
 # Transcribe a WAV file
-./target/release/qwen-asr -d qwen3-asr-0.6b -i audio.wav
+./target/release/qwen-asr -m qwen3-asr-0.6b -i audio.wav
 
 # Pipe audio from stdin
-cat audio.wav | ./target/release/qwen-asr -d qwen3-asr-0.6b --stdin
+cat audio.wav | ./target/release/qwen-asr -m qwen3-asr-0.6b --stdin
 
 # Raw s16le 16kHz mono from stdin
-ffmpeg -i video.mp4 -f s16le -ar 16000 -ac 1 - | ./target/release/qwen-asr -d qwen3-asr-0.6b --stdin
+ffmpeg -i video.mp4 -f s16le -ar 16000 -ac 1 - | ./target/release/qwen-asr -m qwen3-asr-0.6b --stdin
 
 # Silent mode (only transcript on stdout, no status on stderr)
-./target/release/qwen-asr -d qwen3-asr-0.6b -i audio.wav --silent
+./target/release/qwen-asr -m qwen3-asr-0.6b -i audio.wav --silent
 ```
 
 ### Segmented Mode
@@ -179,7 +179,7 @@ ffmpeg -i video.mp4 -f s16le -ar 16000 -ac 1 - | ./target/release/qwen-asr -d qw
 Split long audio at silence boundaries for better accuracy and lower memory:
 
 ```bash
-./target/release/qwen-asr -d qwen3-asr-0.6b -i long_audio.wav -S 30
+./target/release/qwen-asr -m qwen3-asr-0.6b -i long_audio.wav -S 30
 ```
 
 ### Streaming Mode
@@ -188,10 +188,10 @@ Process audio in 2-second chunks with incremental output. Uses prefix rollback f
 
 ```bash
 # Streaming from a file
-./target/release/qwen-asr -d qwen3-asr-0.6b -i audio.wav --stream
+./target/release/qwen-asr -m qwen3-asr-0.6b -i audio.wav --stream
 
 # Streaming with custom chunk size
-./target/release/qwen-asr -d qwen3-asr-0.6b -i audio.wav --stream --stream-chunk-sec 4
+./target/release/qwen-asr -m qwen3-asr-0.6b -i audio.wav --stream --stream-chunk-sec 4
 ```
 
 ### Live Capture (macOS / Linux)
@@ -200,10 +200,10 @@ Capture audio from an input device in real time. Requires an audio input device 
 
 ```bash
 # Default input device, segmented mode
-./target/release/qwen-asr -d qwen3-asr-0.6b --live
+./target/release/qwen-asr -m qwen3-asr-0.6b --live
 
 # Specific device, streaming mode (best accuracy)
-./target/release/qwen-asr -d qwen3-asr-0.6b --live --stream --device "BlackHole 2ch"
+./target/release/qwen-asr -m qwen3-asr-0.6b --live --stream --device "BlackHole 2ch"
 
 # List available audio input devices
 ./target/release/qwen-asr --list-devices
@@ -214,7 +214,7 @@ Capture audio from an input device in real time. Requires an audio input device 
 Voice Activity Detection mode captures audio in real time, detects speech segments using energy-based VAD, and transcribes each segment independently. Useful for conversations with natural pauses:
 
 ```bash
-./target/release/qwen-asr -d qwen3-asr-0.6b --live --vad --device "BlackHole 2ch"
+./target/release/qwen-asr -m qwen3-asr-0.6b --live --vad --device "BlackHole 2ch"
 ```
 
 VAD mode uses cross-segment prompt conditioning — each segment's output is passed as context to the next, improving accuracy across segments.
@@ -224,7 +224,7 @@ VAD mode uses cross-segment prompt conditioning — each segment's output is pas
 Produce word-level timestamps for a known transcript (requires the ForcedAligner model variant):
 
 ```bash
-./target/release/qwen-asr -d qwen3-aligner-0.6b -i audio.wav --align "Hello world" --align-language English
+./target/release/qwen-asr -m qwen3-aligner-0.6b -i audio.wav --align "Hello world" --align-language English
 ```
 
 ### Model Download
@@ -237,13 +237,19 @@ Models can be downloaded via the built-in download subcommand:
 
 # Download a model
 ./target/release/qwen-asr download qwen3-asr-0.6b
+
+# Download by Hugging Face repo
+./target/release/qwen-asr download mlx-community/Qwen3-ASR-0.6B-4bit
 ```
+
+By default, downloaded models are placed under a platform-specific data directory in a `qwen-asr/models/<model-name>/` subfolder (XDG data directory on Linux).
 
 ### All Options
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `-d <dir>` | Model directory (required) | — |
+| `-m <model\|dir>` | Model name in default model dir, or explicit model directory path (required) | — |
+| `-d <model\|dir>` | Alias for `-m` (backward compatibility) | — |
 | `-i <file>` | Input WAV file (16-bit PCM, any sample rate) | — |
 | `--stdin` | Read audio from stdin (WAV or raw s16le 16kHz mono) | off |
 | `--live` | Capture from audio input device in real time (macOS / Linux) | off |

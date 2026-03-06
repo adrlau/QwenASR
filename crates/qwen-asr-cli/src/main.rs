@@ -17,11 +17,12 @@ fn stream_token(piece: &str) {
 fn usage(prog: &str) {
     eprintln!("qwen-asr — Qwen3-ASR speech-to-text (pure Rust)\n");
     eprintln!(
-        "Usage: {} -d <model_dir> (-i <input.wav> | --stdin | --live) [options]\n",
+        "Usage: {} -m <model|model_dir> (-i <input.wav> | --stdin | --live) [options]\n",
         prog
     );
     eprintln!("Required:");
-    eprintln!("  -d <dir>      Model directory (with *.safetensors, vocab.json)");
+    eprintln!("  -m <value>    Model name (in default model dir) or model directory path");
+    eprintln!("  -d <value>    Alias for -m (backward compatible)");
     eprintln!("  -i <file>     Input WAV file (16-bit PCM, any sample rate)");
     eprintln!("  --stdin       Read audio from stdin (auto-detect WAV or raw s16le 16kHz mono)");
     eprintln!("\nLive capture:");
@@ -50,7 +51,10 @@ fn usage(prog: &str) {
     eprintln!("  --debug       Debug output (per-layer details)");
     eprintln!("  --silent      No status output (only transcription on stdout)");
     eprintln!("\nModel management:");
-    eprintln!("  {} download [--list] [<model>] [--output <dir>]", prog);
+    eprintln!(
+        "  {} download [--list] [<model|hf-repo>] [--output <dir>]",
+        prog
+    );
     eprintln!("  -h            Show this help");
 }
 
@@ -85,7 +89,7 @@ fn main() {
         return;
     }
 
-    let mut model_dir: Option<String> = None;
+    let mut model_arg: Option<String> = None;
     let mut input_wav: Option<String> = None;
     let mut verbosity = 1i32;
     let mut use_stdin = false;
@@ -110,9 +114,13 @@ fn main() {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
+            "-m" => {
+                i += 1;
+                model_arg = args.get(i).cloned();
+            }
             "-d" => {
                 i += 1;
-                model_dir = args.get(i).cloned();
+                model_arg = args.get(i).cloned();
             }
             "-i" => {
                 i += 1;
@@ -214,18 +222,21 @@ fn main() {
         i += 1;
     }
 
-    let model_dir = match model_dir {
+    let model_arg = match model_arg {
         Some(d) => d,
         None => {
             usage(&args[0]);
             std::process::exit(1);
         }
     };
+    let model_dir = download::resolve_model_dir(&model_arg)
+        .to_string_lossy()
+        .to_string();
 
     // Auto-prompt to download if model directory doesn't exist
     if !std::path::Path::new(&model_dir).exists() {
-        if let Some(model) = download::find_model(&model_dir) {
-            if download::prompt_download(&model_dir) {
+        if let Some(model) = download::find_model(&model_arg) {
+            if download::prompt_download(model.name) {
                 if let Err(e) = download::download_model(model, &model_dir) {
                     eprintln!("Download failed: {}", e);
                     std::process::exit(1);
@@ -237,6 +248,7 @@ fn main() {
             }
         } else {
             eprintln!("Error: Model directory '{}' not found.", model_dir);
+            eprintln!("Tip: use -m with a known model name to auto-download.");
             eprintln!();
             download::list_models();
             std::process::exit(1);

@@ -66,13 +66,12 @@ fn home_dir() -> Option<PathBuf> {
 pub fn default_models_root() -> PathBuf {
     #[cfg(target_os = "linux")]
     {
-        if let Some(xdg_data_home) = std::env::var_os("XDG_DATA_HOME") {
-            return PathBuf::from(xdg_data_home).join("qwen-asr").join("models");
+        if let Some(xdg_cache_home) = std::env::var_os("XDG_CACHE_HOME") {
+            return PathBuf::from(xdg_cache_home).join("qwen-asr").join("models");
         }
         if let Some(home) = home_dir() {
             return home
-                .join(".local")
-                .join("share")
+                .join(".cache")
                 .join("qwen-asr")
                 .join("models");
         }
@@ -83,7 +82,7 @@ pub fn default_models_root() -> PathBuf {
         if let Some(home) = home_dir() {
             return home
                 .join("Library")
-                .join("Application Support")
+                .join("Caches")
                 .join("qwen-asr")
                 .join("models");
         }
@@ -91,13 +90,13 @@ pub fn default_models_root() -> PathBuf {
 
     #[cfg(target_os = "windows")]
     {
-        if let Some(appdata) = std::env::var_os("APPDATA") {
-            return PathBuf::from(appdata).join("qwen-asr").join("models");
+        if let Some(localappdata) = std::env::var_os("LOCALAPPDATA") {
+            return PathBuf::from(localappdata).join("qwen-asr").join("models");
         }
         if let Some(home) = home_dir() {
             return home
                 .join("AppData")
-                .join("Roaming")
+                .join("Local")
                 .join("qwen-asr")
                 .join("models");
         }

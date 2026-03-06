@@ -21,8 +21,8 @@ fn usage(prog: &str) {
         prog
     );
     eprintln!("Required:");
-    eprintln!("  -m <value>    Model name (in default model dir) or model directory path");
-    eprintln!("  -d <value>    Alias for -m (backward compatible)");
+    eprintln!("  -m <model|model_dir>    Model name (in default model dir) or model directory path");
+    eprintln!("  -d <model|model_dir>    Alias for -m (backward compatible)");
     eprintln!("  -i <file>     Input WAV file (16-bit PCM, any sample rate)");
     eprintln!("  --stdin       Read audio from stdin (auto-detect WAV or raw s16le 16kHz mono)");
     eprintln!("\nLive capture:");
@@ -43,7 +43,7 @@ fn usage(prog: &str) {
     eprintln!("  --past-text <yes|no|auto>  Reuse previously decoded text as context");
     eprintln!("  --skip-silence              Drop long silent spans before inference");
     eprintln!("  --prompt <text>            System prompt for biasing");
-    eprintln!("  --language <lang>          Force output language");
+    eprintln!("  --language <lang>          Force output language (e.g. English, Chinese, Japanese)");
     eprintln!("\nAlignment mode (requires ForcedAligner model):");
     eprintln!("  --align <text>             Align transcript to audio (word-level timestamps)");
     eprintln!("  --align-language <lang>    Language for word splitting (default: English)");

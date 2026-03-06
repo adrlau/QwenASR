@@ -242,7 +242,7 @@ Models can be downloaded via the built-in download subcommand:
 ./target/release/qwen-asr download mlx-community/Qwen3-ASR-0.6B-4bit
 ```
 
-By default, downloaded models are placed under a platform-specific data directory in a `qwen-asr/models/<model-name>/` subfolder (XDG data directory on Linux).
+By default, downloaded models are placed under a platform-specific cache directory in a `qwen-asr/models/<model-name>/` subfolder (`$XDG_CACHE_HOME/qwen-asr/models` on Linux, `~/Library/Caches/qwen-asr/models` on macOS).
 
 ### All Options
 
@@ -266,7 +266,7 @@ By default, downloaded models are placed under a platform-specific data director
 | `--past-text <yes\|no\|auto>` | Reuse decoded text as context for next segment | auto |
 | `--skip-silence` | Drop long silent spans before inference | off |
 | `--prompt <text>` | System prompt for biasing | — |
-| `--language <lang>` | Force output language (e.g., `en`, `zh`, `ja`) | auto |
+| `--language <lang>` | Force output language (e.g., `English`, `Chinese`, `Japanese`) | auto |
 | `--align <text>` | Align transcript to audio (word-level timestamps) | — |
 | `--align-language <lang>` | Language for alignment word splitting | English |
 | `--profile` | Print per-operation timing breakdown | off |

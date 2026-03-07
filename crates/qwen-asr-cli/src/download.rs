@@ -497,6 +497,7 @@ pub fn handle_download_command(args: &[String]) -> bool {
     let mut model_name: Option<String> = None;
     let mut output_dir: Option<String> = None;
     let mut show_list = false;
+    let mut dry_run = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -508,6 +509,9 @@ pub fn handle_download_command(args: &[String]) -> bool {
                 i += 1;
                 output_dir = args.get(i).cloned();
             }
+            "--dry-run" => {
+                dry_run = true;
+            }
             "-h" | "--help" => {
                 eprintln!(
                     "Usage: qwen-asr download [--list] [<model-name|hf-repo>] [--output <dir>]\n"
@@ -518,6 +522,7 @@ pub fn handle_download_command(args: &[String]) -> bool {
                     "  --output, -o     Download directory (default: {}/<model-name>/)",
                     default_models_root().display()
                 );
+                eprintln!("  --dry-run        Show where files would be downloaded and exit");
                 eprintln!("  -h, --help       Show this help");
                 return true;
             }
@@ -533,12 +538,12 @@ pub fn handle_download_command(args: &[String]) -> bool {
         i += 1;
     }
 
-    if show_list || model_name.is_none() {
+    if show_list || (model_name.is_none() && !dry_run) {
         list_models();
         return true;
     }
 
-    let name = model_name.unwrap();
+    let name = model_name.unwrap_or_else(|| "qwen3-asr-0.6b".to_string());
     if looks_like_path(&name) {
         eprintln!(
             "Error: '{}' appears to be a local path. The download command expects a model name or Hugging Face repository ID.\n",
@@ -548,9 +553,18 @@ pub fn handle_download_command(args: &[String]) -> bool {
         return true;
     }
 
+    let path = resolve_model_dir(&name);
+    let dir = output_dir.unwrap_or_else(|| path.to_string_lossy().to_string());
+
+    if dry_run {
+        eprintln!(
+            "Dry run: Model identifier '{}' would resolve to directory:\n  {}",
+            name, dir
+        );
+        return true;
+    }
+
     if let Some(model) = find_model(&name) {
-        let path = resolve_model_dir(model.name);
-        let dir = output_dir.unwrap_or_else(|| path.to_string_lossy().to_string());
         match download_model(model, &dir) {
             Ok(()) => {}
             Err(e) => {
@@ -559,8 +573,6 @@ pub fn handle_download_command(args: &[String]) -> bool {
             }
         }
     } else if is_hf_repo_id(&name) {
-        let path = resolve_model_dir(&name);
-        let dir = output_dir.unwrap_or_else(|| path.to_string_lossy().to_string());
         match download_repo_model(&name, &dir) {
             Ok(()) => {}
             Err(e) => {

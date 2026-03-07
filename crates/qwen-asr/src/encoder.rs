@@ -1,5 +1,4 @@
 /// Audio encoder: Conv2D stem + windowed transformer + projection cascade.
-
 use crate::config::*;
 use crate::kernels;
 use crate::safetensors::MultiSafetensors;
@@ -54,7 +53,11 @@ impl EncoderBuffers {
         if total_tokens <= self.cap_tokens {
             return;
         }
-        let mut new_cap = if self.cap_tokens > 0 { self.cap_tokens } else { 256 };
+        let mut new_cap = if self.cap_tokens > 0 {
+            self.cap_tokens
+        } else {
+            256
+        };
         while new_cap < total_tokens {
             new_cap *= 2;
         }
@@ -87,47 +90,50 @@ pub struct Encoder {
     pub proj2_bias: Vec<f32>,
 }
 
-const ENC_PREFIX: &str = "thinker.audio_tower.";
+const ENC_PREFIXES: &[&str] = &["thinker.audio_tower.", "audio_tower."];
 
 fn load_f32(ms: &MultiSafetensors, name: &str) -> Option<Vec<f32>> {
-    let result = ms.get_f32(name);
-    if result.is_none() {
-        eprintln!("encoder: weight not found: {}", name);
+    for prefix in ENC_PREFIXES {
+        let full_name = format!("{}{}", prefix, name);
+        if let Some(result) = ms.get_f32(&full_name) {
+            return Some(result);
+        }
     }
-    result
+    eprintln!("encoder: weight not found: {}", name);
+    None
 }
 
 fn load_bf16_as_f32(ms: &MultiSafetensors, name: &str) -> Option<Vec<f32>> {
-    let (si, t) = ms.find(name).or_else(|| {
-        eprintln!("encoder: weight not found: {}", name);
-        None
-    })?;
-
-    let bf16_ptr = ms.shards[si].get_bf16_direct(t)?;
-    let n = t.numel();
-    let mut f32_data = vec![0.0f32; n];
-    let src = unsafe { std::slice::from_raw_parts(bf16_ptr, n) };
-    for i in 0..n {
-        f32_data[i] = f32::from_bits((src[i] as u32) << 16);
+    for prefix in ENC_PREFIXES {
+        let full_name = format!("{}{}", prefix, name);
+        if let Some((si, t)) = ms.find(&full_name) {
+            let bf16_ptr = ms.shards[si].get_bf16_direct(t)?;
+            let n = t.numel();
+            let mut f32_data = vec![0.0f32; n];
+            let src = unsafe { std::slice::from_raw_parts(bf16_ptr, n) };
+            for i in 0..n {
+                f32_data[i] = f32::from_bits((src[i] as u32) << 16);
+            }
+            return Some(f32_data);
+        }
     }
-    Some(f32_data)
+    eprintln!("encoder: weight not found: {}", name);
+    None
 }
 
 impl Encoder {
     pub fn load(ms: &MultiSafetensors, cfg: &QwenConfig) -> Option<Self> {
-        let p = ENC_PREFIX;
-
-        let conv1_weight = load_f32(ms, &format!("{}conv2d1.weight", p))?;
-        let conv1_bias = load_f32(ms, &format!("{}conv2d1.bias", p))?;
-        let conv2_weight = load_f32(ms, &format!("{}conv2d2.weight", p))?;
-        let conv2_bias = load_f32(ms, &format!("{}conv2d2.bias", p))?;
-        let conv3_weight = load_f32(ms, &format!("{}conv2d3.weight", p))?;
-        let conv3_bias = load_f32(ms, &format!("{}conv2d3.bias", p))?;
-        let conv_out_weight = load_bf16_as_f32(ms, &format!("{}conv_out.weight", p))?;
+        let conv1_weight = load_f32(ms, "conv2d1.weight")?;
+        let conv1_bias = load_f32(ms, "conv2d1.bias")?;
+        let conv2_weight = load_f32(ms, "conv2d2.weight")?;
+        let conv2_bias = load_f32(ms, "conv2d2.bias")?;
+        let conv3_weight = load_f32(ms, "conv2d3.weight")?;
+        let conv3_bias = load_f32(ms, "conv2d3.bias")?;
+        let conv_out_weight = load_bf16_as_f32(ms, "conv_out.weight")?;
 
         let mut layers = Vec::new();
         for i in 0..cfg.enc_layers {
-            let lp = format!("{}layers.{}", p, i);
+            let lp = format!("layers.{}", i);
 
             let layer = EncLayer {
                 wq_weight: load_bf16_as_f32(ms, &format!("{}.self_attn.q_proj.weight", lp))?,
@@ -150,12 +156,12 @@ impl Encoder {
             layers.push(layer);
         }
 
-        let ln_post_weight = load_f32(ms, &format!("{}ln_post.weight", p))?;
-        let ln_post_bias = load_f32(ms, &format!("{}ln_post.bias", p))?;
-        let proj1_weight = load_bf16_as_f32(ms, &format!("{}proj1.weight", p))?;
-        let proj1_bias = load_f32(ms, &format!("{}proj1.bias", p))?;
-        let proj2_weight = load_bf16_as_f32(ms, &format!("{}proj2.weight", p))?;
-        let proj2_bias = load_f32(ms, &format!("{}proj2.bias", p))?;
+        let ln_post_weight = load_f32(ms, "ln_post.weight")?;
+        let ln_post_bias = load_f32(ms, "ln_post.bias")?;
+        let proj1_weight = load_bf16_as_f32(ms, "proj1.weight")?;
+        let proj1_bias = load_f32(ms, "proj1.bias")?;
+        let proj2_weight = load_bf16_as_f32(ms, "proj2.weight")?;
+        let proj2_bias = load_f32(ms, "proj2.bias")?;
 
         Some(Encoder {
             conv1_weight,
@@ -177,7 +183,13 @@ impl Encoder {
 
     /// Run encoder forward pass on mel spectrogram.
     /// mel: [128, mel_frames], returns [total_tokens, output_dim].
-    pub fn forward(&self, cfg: &QwenConfig, mel: &[f32], mel_frames: usize, enc_bufs: Option<&mut EncoderBuffers>) -> Option<(Vec<f32>, usize)> {
+    pub fn forward(
+        &self,
+        cfg: &QwenConfig,
+        mel: &[f32],
+        mel_frames: usize,
+        enc_bufs: Option<&mut EncoderBuffers>,
+    ) -> Option<(Vec<f32>, usize)> {
         let d_model = cfg.enc_d_model;
         let n_heads = cfg.enc_heads;
         let head_dim = cfg.enc_head_dim;
@@ -230,8 +242,18 @@ impl Encoder {
             let w1 = (chunk_w + 2 - 3) / 2 + 1;
             let mut c1 = vec![0.0f32; CONV_HIDDEN * h1 * w1];
             kernels::conv2d(
-                &mut c1, &chunk_mel, &self.conv1_weight, Some(&self.conv1_bias),
-                1, CONV_HIDDEN, 128, chunk_w, 3, 3, 2, 1,
+                &mut c1,
+                &chunk_mel,
+                &self.conv1_weight,
+                Some(&self.conv1_bias),
+                1,
+                CONV_HIDDEN,
+                128,
+                chunk_w,
+                3,
+                3,
+                2,
+                1,
             );
             kernels::gelu(&mut c1, CONV_HIDDEN * h1 * w1);
 
@@ -240,8 +262,18 @@ impl Encoder {
             let w2 = (w1 + 2 - 3) / 2 + 1;
             let mut c2 = vec![0.0f32; CONV_HIDDEN * h2 * w2];
             kernels::conv2d(
-                &mut c2, &c1, &self.conv2_weight, Some(&self.conv2_bias),
-                CONV_HIDDEN, CONV_HIDDEN, h1, w1, 3, 3, 2, 1,
+                &mut c2,
+                &c1,
+                &self.conv2_weight,
+                Some(&self.conv2_bias),
+                CONV_HIDDEN,
+                CONV_HIDDEN,
+                h1,
+                w1,
+                3,
+                3,
+                2,
+                1,
             );
             kernels::gelu(&mut c2, CONV_HIDDEN * h2 * w2);
 
@@ -251,8 +283,18 @@ impl Encoder {
             debug_assert_eq!(_w3_calc, w3);
             let mut c3 = vec![0.0f32; CONV_HIDDEN * h3 * w3];
             kernels::conv2d(
-                &mut c3, &c2, &self.conv3_weight, Some(&self.conv3_bias),
-                CONV_HIDDEN, CONV_HIDDEN, h2, w2, 3, 3, 2, 1,
+                &mut c3,
+                &c2,
+                &self.conv3_weight,
+                Some(&self.conv3_bias),
+                CONV_HIDDEN,
+                CONV_HIDDEN,
+                h2,
+                w2,
+                3,
+                3,
+                2,
+                1,
             );
             kernels::gelu(&mut c3, CONV_HIDDEN * h3 * w3);
 
@@ -272,7 +314,14 @@ impl Encoder {
 
             // Project: [w3, 7680] -> [w3, d_model]
             let projected = &mut x[token_offset * d_model..(token_offset + w3) * d_model];
-            kernels::linear_nobias(projected, &reshaped, &self.conv_out_weight, w3, conv_proj_dim, d_model);
+            kernels::linear_nobias(
+                projected,
+                &reshaped,
+                &self.conv_out_weight,
+                w3,
+                conv_proj_dim,
+                d_model,
+            );
 
             // Add per-chunk sinusoidal PE
             let mut pe = vec![0.0f32; w3 * d_model];
@@ -294,8 +343,15 @@ impl Encoder {
         // Transformer layer scratch buffers (reusable or fresh)
         let mut _owned_bufs;
         let bufs: &mut EncoderBuffers = match enc_bufs {
-            Some(b) => { b.ensure(total_tokens, d_model, ffn_dim); b }
-            None => { _owned_bufs = EncoderBuffers::new(); _owned_bufs.ensure(total_tokens, d_model, ffn_dim); &mut _owned_bufs }
+            Some(b) => {
+                b.ensure(total_tokens, d_model, ffn_dim);
+                b
+            }
+            None => {
+                _owned_bufs = EncoderBuffers::new();
+                _owned_bufs.ensure(total_tokens, d_model, ffn_dim);
+                &mut _owned_bufs
+            }
         };
 
         let scale = 1.0 / (head_dim as f32).sqrt();
@@ -304,49 +360,135 @@ impl Encoder {
 
         for layer in &self.layers {
             // Self-attention
-            kernels::layer_norm(&mut bufs.x_norm[..td], &x, &layer.attn_norm_weight, &layer.attn_norm_bias,
-                              total_tokens, d_model, 1e-5);
+            kernels::layer_norm(
+                &mut bufs.x_norm[..td],
+                &x,
+                &layer.attn_norm_weight,
+                &layer.attn_norm_bias,
+                total_tokens,
+                d_model,
+                1e-5,
+            );
 
-            kernels::linear(&mut bufs.q[..td], &bufs.x_norm[..td], &layer.wq_weight, Some(&layer.wq_bias),
-                          total_tokens, d_model, d_model);
-            kernels::linear(&mut bufs.k[..td], &bufs.x_norm[..td], &layer.wk_weight, Some(&layer.wk_bias),
-                          total_tokens, d_model, d_model);
-            kernels::linear(&mut bufs.v[..td], &bufs.x_norm[..td], &layer.wv_weight, Some(&layer.wv_bias),
-                          total_tokens, d_model, d_model);
+            kernels::linear(
+                &mut bufs.q[..td],
+                &bufs.x_norm[..td],
+                &layer.wq_weight,
+                Some(&layer.wq_bias),
+                total_tokens,
+                d_model,
+                d_model,
+            );
+            kernels::linear(
+                &mut bufs.k[..td],
+                &bufs.x_norm[..td],
+                &layer.wk_weight,
+                Some(&layer.wk_bias),
+                total_tokens,
+                d_model,
+                d_model,
+            );
+            kernels::linear(
+                &mut bufs.v[..td],
+                &bufs.x_norm[..td],
+                &layer.wv_weight,
+                Some(&layer.wv_bias),
+                total_tokens,
+                d_model,
+                d_model,
+            );
 
-            kernels::bidirectional_attention(&mut bufs.attn_out[..td], &bufs.q[..td], &bufs.k[..td], &bufs.v[..td],
-                                           total_tokens, n_heads, head_dim, scale,
-                                           &window_starts, n_windows);
+            kernels::bidirectional_attention(
+                &mut bufs.attn_out[..td],
+                &bufs.q[..td],
+                &bufs.k[..td],
+                &bufs.v[..td],
+                total_tokens,
+                n_heads,
+                head_dim,
+                scale,
+                &window_starts,
+                n_windows,
+            );
 
-            kernels::linear(&mut bufs.proj_out[..td], &bufs.attn_out[..td], &layer.wo_weight, Some(&layer.wo_bias),
-                          total_tokens, d_model, d_model);
+            kernels::linear(
+                &mut bufs.proj_out[..td],
+                &bufs.attn_out[..td],
+                &layer.wo_weight,
+                Some(&layer.wo_bias),
+                total_tokens,
+                d_model,
+                d_model,
+            );
             kernels::add_inplace(&mut x, &bufs.proj_out[..td], td);
 
             // FFN
-            kernels::layer_norm(&mut bufs.x_norm[..td], &x, &layer.ffn_norm_weight, &layer.ffn_norm_bias,
-                              total_tokens, d_model, 1e-5);
+            kernels::layer_norm(
+                &mut bufs.x_norm[..td],
+                &x,
+                &layer.ffn_norm_weight,
+                &layer.ffn_norm_bias,
+                total_tokens,
+                d_model,
+                1e-5,
+            );
 
-            kernels::linear(&mut bufs.ffn_mid[..tf], &bufs.x_norm[..td], &layer.fc1_weight, Some(&layer.fc1_bias),
-                          total_tokens, d_model, ffn_dim);
+            kernels::linear(
+                &mut bufs.ffn_mid[..tf],
+                &bufs.x_norm[..td],
+                &layer.fc1_weight,
+                Some(&layer.fc1_bias),
+                total_tokens,
+                d_model,
+                ffn_dim,
+            );
             kernels::gelu(&mut bufs.ffn_mid[..tf], tf);
-            kernels::linear(&mut bufs.ffn_out[..td], &bufs.ffn_mid[..tf], &layer.fc2_weight, Some(&layer.fc2_bias),
-                          total_tokens, ffn_dim, d_model);
+            kernels::linear(
+                &mut bufs.ffn_out[..td],
+                &bufs.ffn_mid[..tf],
+                &layer.fc2_weight,
+                Some(&layer.fc2_bias),
+                total_tokens,
+                ffn_dim,
+                d_model,
+            );
             kernels::add_inplace(&mut x, &bufs.ffn_out[..td], td);
         }
 
         // Final LayerNorm: use x_norm as temp, then swap into x
-        kernels::layer_norm(&mut bufs.x_norm[..td], &x, &self.ln_post_weight, &self.ln_post_bias,
-                          total_tokens, d_model, 1e-5);
+        kernels::layer_norm(
+            &mut bufs.x_norm[..td],
+            &x,
+            &self.ln_post_weight,
+            &self.ln_post_bias,
+            total_tokens,
+            d_model,
+            1e-5,
+        );
         x[..td].copy_from_slice(&bufs.x_norm[..td]);
 
         // Projection: proj1 (GELU) -> proj2 (reuse scratch buffers)
-        kernels::linear(&mut bufs.q[..td], &x, &self.proj1_weight, Some(&self.proj1_bias),
-                       total_tokens, d_model, d_model);
+        kernels::linear(
+            &mut bufs.q[..td],
+            &x,
+            &self.proj1_weight,
+            Some(&self.proj1_bias),
+            total_tokens,
+            d_model,
+            d_model,
+        );
         kernels::gelu(&mut bufs.q[..td], td);
 
         let mut enc_output = vec![0.0f32; total_tokens * output_dim];
-        kernels::linear(&mut enc_output, &bufs.q[..td], &self.proj2_weight, Some(&self.proj2_bias),
-                       total_tokens, d_model, output_dim);
+        kernels::linear(
+            &mut enc_output,
+            &bufs.q[..td],
+            &self.proj2_weight,
+            Some(&self.proj2_bias),
+            total_tokens,
+            d_model,
+            output_dim,
+        );
 
         Some((enc_output, total_tokens))
     }

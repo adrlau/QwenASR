@@ -1,5 +1,4 @@
 /// Qwen3 LLM decoder with GQA, KV cache, and generation.
-
 use crate::config::*;
 use crate::kernels;
 use crate::safetensors::MultiSafetensors;
@@ -33,29 +32,37 @@ pub struct Decoder {
 unsafe impl Send for Decoder {}
 unsafe impl Sync for Decoder {}
 
+const DEC_PREFIXES: &[&str] = &["thinker.", ""];
+
 fn load_f32(ms: &MultiSafetensors, name: &str) -> Option<Vec<f32>> {
-    let result = ms.get_f32(name);
-    if result.is_none() {
-        eprintln!("decoder: weight not found: {}", name);
+    for prefix in DEC_PREFIXES {
+        let full_name = format!("{}{}", prefix, name);
+        if let Some(result) = ms.get_f32(&full_name) {
+            return Some(result);
+        }
     }
-    result
+    eprintln!("decoder: weight not found: {}", name);
+    None
 }
 
 fn load_bf16_direct(ms: &MultiSafetensors, name: &str) -> Option<*const u16> {
-    let result = ms.get_bf16_direct(name);
-    if result.is_none() {
-        eprintln!("decoder: weight not found: {}", name);
+    for prefix in DEC_PREFIXES {
+        let full_name = format!("{}{}", prefix, name);
+        if let Some(result) = ms.get_bf16_direct(&full_name) {
+            return Some(result);
+        }
     }
-    result
+    eprintln!("decoder: weight not found: {}", name);
+    None
 }
 
 impl Decoder {
     pub fn load(ms: &MultiSafetensors, cfg: &QwenConfig) -> Option<Self> {
-        let tok_embeddings_bf16 = load_bf16_direct(ms, "thinker.model.embed_tokens.weight")?;
+        let tok_embeddings_bf16 = load_bf16_direct(ms, "model.embed_tokens.weight")?;
 
         let mut layers = Vec::new();
         for i in 0..cfg.dec_layers {
-            let lp = format!("thinker.model.layers.{}", i);
+            let lp = format!("model.layers.{}", i);
 
             let wq = load_bf16_direct(ms, &format!("{}.self_attn.q_proj.weight", lp))?;
             let wk = load_bf16_direct(ms, &format!("{}.self_attn.k_proj.weight", lp))?;
@@ -102,15 +109,16 @@ impl Decoder {
             });
         }
 
-        let norm = load_f32(ms, "thinker.model.norm.weight")?;
+        let norm = load_f32(ms, "model.norm.weight")?;
 
         // Load separate lm_head if present (forced aligner has untied lm_head)
         let lm_head_bf16 = if cfg.classify_num > 0 {
-            let ptr = load_bf16_direct(ms, "thinker.lm_head.weight")?;
+            let ptr = load_bf16_direct(ms, "lm_head.weight")?;
             Some(ptr)
         } else {
             // For normal ASR, lm_head is tied with tok_embeddings (no separate weight)
-            ms.get_bf16_direct("thinker.lm_head.weight")
+            // But some repos might still have it explicitly
+            load_bf16_direct(ms, "lm_head.weight")
         };
 
         Some(Decoder {
@@ -370,7 +378,11 @@ impl DecoderBuffers {
         let kv_dim = cfg.dec_kv_heads * cfg.dec_head_dim;
         let intermediate = cfg.dec_intermediate;
 
-        let mut new_cap = if self.pref_seq_cap > 0 { self.pref_seq_cap } else { 64 };
+        let mut new_cap = if self.pref_seq_cap > 0 {
+            self.pref_seq_cap
+        } else {
+            64
+        };
         while new_cap < seq_len {
             new_cap *= 2;
         }
@@ -389,6 +401,12 @@ impl DecoderBuffers {
     }
 }
 
+pub fn tok_embed_bf16_to_f32(dst: &mut [f32], tok_emb: *const u16, token: i32, dim: usize) {
+    let off = token as usize * dim;
+    let src = unsafe { std::slice::from_raw_parts(tok_emb.add(off), dim) };
+    kernels::bf16_to_f32_buf(dst, src);
+}
+
 /// Decoder prefill: process multiple tokens.
 pub fn decoder_prefill(
     decoder: &Decoder,
@@ -399,6 +417,50 @@ pub fn decoder_prefill(
     input_embeds: &[f32],
     seq_len: usize,
 ) {
+    decoder_prefill_internal(
+        decoder,
+        cfg,
+        kv_cache,
+        rope,
+        bufs,
+        input_embeds,
+        seq_len,
+        false,
+    );
+}
+
+/// Decoder prefill: process multiple tokens and return logits for all positions.
+pub fn decoder_prefill_logits(
+    decoder: &Decoder,
+    cfg: &QwenConfig,
+    kv_cache: &mut KvCache,
+    rope: &mut RopeCache,
+    bufs: &mut DecoderBuffers,
+    input_embeds: &[f32],
+    seq_len: usize,
+) -> Vec<f32> {
+    decoder_prefill_internal(
+        decoder,
+        cfg,
+        kv_cache,
+        rope,
+        bufs,
+        input_embeds,
+        seq_len,
+        true,
+    )
+}
+
+fn decoder_prefill_internal(
+    decoder: &Decoder,
+    cfg: &QwenConfig,
+    kv_cache: &mut KvCache,
+    rope: &mut RopeCache,
+    bufs: &mut DecoderBuffers,
+    input_embeds: &[f32],
+    seq_len: usize,
+    return_logits: bool,
+) -> Vec<f32> {
     let dim = cfg.dec_hidden;
     let n_heads = cfg.dec_heads;
     let n_kv_heads = cfg.dec_kv_heads;
@@ -429,15 +491,46 @@ pub fn decoder_prefill(
 
     for (layer_idx, layer) in decoder.layers.iter().enumerate() {
         let x_norm = &mut bufs.pref_x_norm[..seq_len * dim];
-        kernels::rms_norm(x_norm, &bufs.pref_x[..seq_len * dim], &layer.input_norm, seq_len, dim, eps);
+        kernels::rms_norm(
+            x_norm,
+            &bufs.pref_x[..seq_len * dim],
+            &layer.input_norm,
+            seq_len,
+            dim,
+            eps,
+        );
 
         let q = &mut bufs.pref_q[..seq_len * q_dim];
         let k = &mut bufs.pref_k[..seq_len * kv_dim];
         let v = &mut bufs.pref_v[..seq_len * kv_dim];
 
-        kernels::linear_nobias_bf16_scratch(q, x_norm, layer.wq_weight_bf16, seq_len, dim, q_dim, &mut bufs.bf16_scratch);
-        kernels::linear_nobias_bf16_scratch(k, x_norm, layer.wk_weight_bf16, seq_len, dim, kv_dim, &mut bufs.bf16_scratch);
-        kernels::linear_nobias_bf16_scratch(v, x_norm, layer.wv_weight_bf16, seq_len, dim, kv_dim, &mut bufs.bf16_scratch);
+        kernels::linear_nobias_bf16_scratch(
+            q,
+            x_norm,
+            layer.wq_weight_bf16,
+            seq_len,
+            dim,
+            q_dim,
+            &mut bufs.bf16_scratch,
+        );
+        kernels::linear_nobias_bf16_scratch(
+            k,
+            x_norm,
+            layer.wk_weight_bf16,
+            seq_len,
+            dim,
+            kv_dim,
+            &mut bufs.bf16_scratch,
+        );
+        kernels::linear_nobias_bf16_scratch(
+            v,
+            x_norm,
+            layer.wv_weight_bf16,
+            seq_len,
+            dim,
+            kv_dim,
+            &mut bufs.bf16_scratch,
+        );
 
         kernels::rms_norm_per_head(q, &layer.q_norm_weight, seq_len, n_heads, head_dim, eps);
         kernels::rms_norm_per_head(k, &layer.k_norm_weight, seq_len, n_kv_heads, head_dim, eps);
@@ -445,11 +538,13 @@ pub fn decoder_prefill(
         kernels::apply_rope_neox(q, rope_cos, rope_sin, seq_len, n_heads, head_dim);
         kernels::apply_rope_neox(k, rope_cos, rope_sin, seq_len, n_kv_heads, head_dim);
 
-        // Store K, V in cache
+        // Store K,V in cache
         for s in 0..seq_len {
-            kv_cache.k_at(layer_idx, start_pos + s)
+            kv_cache
+                .k_at(layer_idx, start_pos + s)
                 .copy_from_slice(&bufs.pref_k[s * kv_dim..(s + 1) * kv_dim]);
-            kv_cache.v_at(layer_idx, start_pos + s)
+            kv_cache
+                .v_at(layer_idx, start_pos + s)
                 .copy_from_slice(&bufs.pref_v[s * kv_dim..(s + 1) * kv_dim]);
         }
 
@@ -458,30 +553,95 @@ pub fn decoder_prefill(
         let full_v = kv_cache.v_layer_full(layer_idx, total_seq);
 
         let attn_out = &mut bufs.pref_attn_out[..seq_len * q_dim];
-        kernels::causal_attention(attn_out, q, full_k, full_v,
-                                 seq_len, total_seq, n_heads, n_kv_heads,
-                                 head_dim, scale, start_pos);
+        kernels::causal_attention(
+            attn_out, q, full_k, full_v, seq_len, total_seq, n_heads, n_kv_heads, head_dim, scale,
+            start_pos,
+        );
 
         let proj_out = &mut bufs.pref_proj_out[..seq_len * dim];
-        kernels::linear_nobias_bf16_scratch(proj_out, attn_out, layer.wo_weight_bf16, seq_len, q_dim, dim, &mut bufs.bf16_scratch);
+        kernels::linear_nobias_bf16_scratch(
+            proj_out,
+            attn_out,
+            layer.wo_weight_bf16,
+            seq_len,
+            q_dim,
+            dim,
+            &mut bufs.bf16_scratch,
+        );
         kernels::add_inplace(&mut bufs.pref_x[..seq_len * dim], proj_out, seq_len * dim);
 
         // Post-attention RMSNorm + SwiGLU MLP
         let x_norm2 = &mut bufs.pref_x_norm[..seq_len * dim];
-        kernels::rms_norm(x_norm2, &bufs.pref_x[..seq_len * dim], &layer.post_attn_norm, seq_len, dim, eps);
+        kernels::rms_norm(
+            x_norm2,
+            &bufs.pref_x[..seq_len * dim],
+            &layer.post_attn_norm,
+            seq_len,
+            dim,
+            eps,
+        );
 
         let gate_up = &mut bufs.pref_gate_up[..seq_len * 2 * intermediate];
-        kernels::linear_nobias_bf16_scratch(gate_up, x_norm2, layer.gate_up_fused_bf16.as_ptr(), seq_len, dim, 2 * intermediate, &mut bufs.bf16_scratch);
+        kernels::linear_nobias_bf16_scratch(
+            gate_up,
+            x_norm2,
+            layer.gate_up_fused_bf16.as_ptr(),
+            seq_len,
+            dim,
+            2 * intermediate,
+            &mut bufs.bf16_scratch,
+        );
 
         let gate = &mut bufs.pref_gate[..seq_len * intermediate];
         kernels::swiglu_multiply(gate, gate_up, seq_len, intermediate);
 
         let ffn_out = &mut bufs.pref_ffn_out[..seq_len * dim];
-        kernels::linear_nobias_bf16_scratch(ffn_out, gate, layer.down_weight_bf16, seq_len, intermediate, dim, &mut bufs.bf16_scratch);
+        kernels::linear_nobias_bf16_scratch(
+            ffn_out,
+            gate,
+            layer.down_weight_bf16,
+            seq_len,
+            intermediate,
+            dim,
+            &mut bufs.bf16_scratch,
+        );
         kernels::add_inplace(&mut bufs.pref_x[..seq_len * dim], ffn_out, seq_len * dim);
     }
 
     kv_cache.len = start_pos + seq_len;
+
+    if return_logits {
+        let mut final_x = vec![0.0f32; seq_len * dim];
+        kernels::rms_norm(
+            &mut final_x,
+            &bufs.pref_x[..seq_len * dim],
+            &decoder.norm,
+            seq_len,
+            dim,
+            eps,
+        );
+
+        let out_dim = cfg.lm_head_dim();
+        let mut logits = vec![0.0f32; seq_len * out_dim];
+        let head_ptr = if let Some(head) = decoder.lm_head_bf16 {
+            head
+        } else {
+            decoder.tok_embeddings_bf16
+        };
+
+        kernels::linear_nobias_bf16_scratch(
+            &mut logits,
+            &final_x,
+            head_ptr,
+            seq_len,
+            dim,
+            out_dim,
+            &mut bufs.bf16_scratch,
+        );
+        logits
+    } else {
+        Vec::new()
+    }
 }
 
 /// Decoder single-token forward: returns greedy token ID.
@@ -518,106 +678,154 @@ pub fn decoder_forward(
     let scale = 1.0 / (head_dim as f32).sqrt();
 
     for (layer_idx, layer) in decoder.layers.iter().enumerate() {
-        kernels::rms_norm(&mut bufs.x_norm[..dim], &bufs.x[..dim], &layer.input_norm, 1, dim, eps);
-
-        kernels::linear_nobias_bf16_qkv(
-            &mut bufs.q[..q_dim], &mut bufs.k[..kv_dim], &mut bufs.v[..kv_dim],
-            &bufs.x_norm[..dim],
-            layer.wq_weight_bf16, layer.wk_weight_bf16, layer.wv_weight_bf16,
-            dim, q_dim, kv_dim,
+        kernels::rms_norm(
+            &mut bufs.x_norm[..dim],
+            &bufs.x[..dim],
+            &layer.input_norm,
+            1,
+            dim,
+            eps,
         );
 
-        kernels::rms_norm_per_head(&mut bufs.q[..q_dim], &layer.q_norm_weight, 1, n_heads, head_dim, eps);
-        kernels::rms_norm_per_head(&mut bufs.k[..kv_dim], &layer.k_norm_weight, 1, n_kv_heads, head_dim, eps);
+        kernels::linear_nobias_bf16_qkv(
+            &mut bufs.q[..q_dim],
+            &mut bufs.k[..kv_dim],
+            &mut bufs.v[..kv_dim],
+            &bufs.x_norm[..dim],
+            layer.wq_weight_bf16,
+            layer.wk_weight_bf16,
+            layer.wv_weight_bf16,
+            dim,
+            q_dim,
+            kv_dim,
+        );
 
-        kernels::apply_rope_neox(&mut bufs.q[..q_dim], rope_cos, rope_sin, 1, n_heads, head_dim);
-        kernels::apply_rope_neox(&mut bufs.k[..kv_dim], rope_cos, rope_sin, 1, n_kv_heads, head_dim);
+        kernels::rms_norm_per_head(
+            &mut bufs.q[..q_dim],
+            &layer.q_norm_weight,
+            1,
+            n_heads,
+            head_dim,
+            eps,
+        );
+        kernels::rms_norm_per_head(
+            &mut bufs.k[..kv_dim],
+            &layer.k_norm_weight,
+            1,
+            n_kv_heads,
+            head_dim,
+            eps,
+        );
 
-        kv_cache.k_at(layer_idx, pos).copy_from_slice(&bufs.k[..kv_dim]);
-        kv_cache.v_at(layer_idx, pos).copy_from_slice(&bufs.v[..kv_dim]);
+        kernels::apply_rope_neox(
+            &mut bufs.q[..q_dim],
+            rope_cos,
+            rope_sin,
+            1,
+            n_heads,
+            head_dim,
+        );
+        kernels::apply_rope_neox(
+            &mut bufs.k[..kv_dim],
+            rope_cos,
+            rope_sin,
+            1,
+            n_kv_heads,
+            head_dim,
+        );
+
+        kv_cache
+            .k_at(layer_idx, pos)
+            .copy_from_slice(&bufs.k[..kv_dim]);
+        kv_cache
+            .v_at(layer_idx, pos)
+            .copy_from_slice(&bufs.v[..kv_dim]);
 
         let total_seq = pos + 1;
         let full_k = kv_cache.k_layer_full(layer_idx, total_seq);
         let full_v = kv_cache.v_layer_full(layer_idx, total_seq);
 
-        kernels::causal_attention(&mut bufs.attn_out[..q_dim], &bufs.q[..q_dim],
-                                 full_k, full_v,
-                                 1, total_seq, n_heads, n_kv_heads,
-                                 head_dim, scale, pos);
+        kernels::causal_attention(
+            &mut bufs.attn_out[..q_dim],
+            &bufs.q[..q_dim],
+            full_k,
+            full_v,
+            1,
+            total_seq,
+            n_heads,
+            n_kv_heads,
+            head_dim,
+            scale,
+            pos,
+        );
 
-        kernels::linear_nobias_bf16(&mut bufs.proj_out[..dim], &bufs.attn_out[..q_dim],
-                                   layer.wo_weight_bf16, 1, q_dim, dim);
+        kernels::linear_nobias_bf16(
+            &mut bufs.proj_out[..dim],
+            &bufs.attn_out[..q_dim],
+            layer.wo_weight_bf16,
+            1,
+            q_dim,
+            dim,
+        );
         kernels::add_inplace(&mut bufs.x[..dim], &bufs.proj_out[..dim], dim);
 
-        kernels::rms_norm(&mut bufs.x_norm[..dim], &bufs.x[..dim], &layer.post_attn_norm, 1, dim, eps);
+        kernels::rms_norm(
+            &mut bufs.x_norm[..dim],
+            &bufs.x[..dim],
+            &layer.post_attn_norm,
+            1,
+            dim,
+            eps,
+        );
 
-        kernels::linear_nobias_bf16(&mut bufs.gate_buf[..2 * intermediate], &bufs.x_norm[..dim],
-                                   layer.gate_up_fused_bf16.as_ptr(), 1, dim, 2 * intermediate);
-        // gate_buf is interleaved: [gate[0], up[0], gate[1], up[1], ...]
-        // Apply SwiGLU: ffn_out[j] = silu(gate[j]) * up[j]
-        for j in 0..intermediate {
-            let g = bufs.gate_buf[2 * j];
-            let u = bufs.gate_buf[2 * j + 1];
-            let g_silu = g / (1.0 + (-g).exp());
-            bufs.ffn_out[j] = g_silu * u;
-        }
-        kernels::linear_nobias_bf16(&mut bufs.gate_buf[..dim], &bufs.ffn_out[..intermediate],
-                                   layer.down_weight_bf16, 1, intermediate, dim);
-        kernels::add_inplace(&mut bufs.x[..dim], &bufs.gate_buf[..dim], dim);
+        kernels::linear_nobias_bf16(
+            &mut bufs.gate_buf[..2 * intermediate],
+            &bufs.x_norm[..dim],
+            layer.gate_up_fused_bf16.as_ptr(),
+            1,
+            dim,
+            2 * intermediate,
+        );
+
+        kernels::swiglu_multiply(
+            &mut bufs.ffn_out[..intermediate],
+            &bufs.gate_buf[..2 * intermediate],
+            1,
+            intermediate,
+        );
+
+        kernels::linear_nobias_bf16(
+            &mut bufs.proj_out[..dim],
+            &bufs.ffn_out[..intermediate],
+            layer.down_weight_bf16,
+            1,
+            intermediate,
+            dim,
+        );
+        kernels::add_inplace(&mut bufs.x[..dim], &bufs.proj_out[..dim], dim);
     }
 
     kv_cache.len = pos + 1;
 
-    // Final norm + streaming argmax
-    {
-        let tmp: Vec<f32> = bufs.x[..dim].to_vec();
-        kernels::rms_norm(&mut bufs.x[..dim], &tmp, &decoder.norm, 1, dim, eps);
+    let mut final_x = vec![0.0f32; dim];
+    kernels::rms_norm(&mut final_x, &bufs.x[..dim], &decoder.norm, 1, dim, eps);
+
+    let mut logits = vec![0.0f32; cfg.vocab_size];
+    let head_ptr = if let Some(head) = decoder.lm_head_bf16 {
+        head
+    } else {
+        decoder.tok_embeddings_bf16
+    };
+
+    kernels::linear_nobias_bf16(&mut logits, &final_x, head_ptr, 1, dim, cfg.vocab_size);
+
+    let mut max_idx = 0;
+    let mut max_val = -1e30f32;
+    for i in 0..logits.len() {
+        if logits[i] > max_val {
+            max_val = logits[i];
+            max_idx = i;
+        }
     }
-    let lm_weight = decoder.lm_head_bf16.unwrap_or(decoder.tok_embeddings_bf16);
-    let lm_out_dim = cfg.lm_head_dim();
-    kernels::argmax_matvec_bf16(&bufs.x[..dim], lm_weight, dim, lm_out_dim) as i32
-}
-
-/// Decoder prefill that returns per-position logits (for forced aligner).
-/// Returns `[seq_len × out_dim]` logits where out_dim = classify_num.
-pub fn decoder_prefill_logits(
-    decoder: &Decoder,
-    cfg: &QwenConfig,
-    kv_cache: &mut KvCache,
-    rope: &mut RopeCache,
-    bufs: &mut DecoderBuffers,
-    input_embeds: &[f32],
-    seq_len: usize,
-) -> Vec<f32> {
-    let dim = cfg.dec_hidden;
-    let eps = cfg.dec_rms_norm_eps;
-    let out_dim = cfg.lm_head_dim();
-
-    // Run the standard prefill to get hidden states
-    decoder_prefill(decoder, cfg, kv_cache, rope, bufs, input_embeds, seq_len);
-
-    // After prefill, pref_x contains the final hidden states for all positions.
-    // Apply final RMS norm and lm_head projection.
-    let x = &bufs.pref_x[..seq_len * dim];
-    let mut x_norm = vec![0.0f32; seq_len * dim];
-    kernels::rms_norm(&mut x_norm, x, &decoder.norm, seq_len, dim, eps);
-
-    let lm_weight = decoder.lm_head_bf16.unwrap_or(decoder.tok_embeddings_bf16);
-
-    // Project each position through lm_head: [seq_len × dim] × [out_dim × dim]^T → [seq_len × out_dim]
-    let mut logits = vec![0.0f32; seq_len * out_dim];
-    kernels::linear_nobias_bf16_scratch(
-        &mut logits, &x_norm, lm_weight,
-        seq_len, dim, out_dim, &mut bufs.bf16_scratch,
-    );
-
-    logits
-}
-
-/// Convert a token embedding from bf16 to f32.
-pub fn tok_embed_bf16_to_f32(dst: &mut [f32], tok_emb_bf16: *const u16, token_id: i32, dim: usize) {
-    let src = unsafe { std::slice::from_raw_parts(tok_emb_bf16.add(token_id as usize * dim), dim) };
-    for i in 0..dim {
-        dst[i] = f32::from_bits((src[i] as u32) << 16);
-    }
+    max_idx as i32
 }

@@ -2,8 +2,8 @@
 
 use crate::config::*;
 use crate::decoder::*;
-use crate::encoder::*;
 use crate::encoder::EncoderBuffers;
+use crate::encoder::*;
 use crate::kernels;
 use crate::safetensors::MultiSafetensors;
 use crate::tokenizer::QwenTokenizer;
@@ -90,23 +90,55 @@ impl QwenCtx {
         let ms = MultiSafetensors::open(model_dir)?;
 
         // Detect model variant from tensor shapes
-        let info = crate::config::DetectInfo {
-            has_enc_layer_18: ms.has_tensor("thinker.audio_tower.layers.18.self_attn.q_proj.weight"),
-            lm_head_shape: ms.find("thinker.lm_head.weight").map(|(_, t)| t.shape.as_slice()),
-            embed_tokens_shape: ms.find("thinker.model.embed_tokens.weight").map(|(_, t)| t.shape.as_slice()),
-            gate_proj_shape: ms.find("thinker.model.layers.0.mlp.gate_proj.weight").map(|(_, t)| t.shape.as_slice()),
+        let mut info = crate::config::DetectInfo {
+            has_enc_layer_18: false,
+            lm_head_shape: None,
+            embed_tokens_shape: None,
+            gate_proj_shape: None,
         };
+
+        // Try with and without "thinker." prefix for detection
+        for prefix in &["thinker.", ""] {
+            if ms.has_tensor(&format!(
+                "{}audio_tower.layers.18.self_attn.q_proj.weight",
+                prefix
+            )) {
+                info.has_enc_layer_18 = true;
+            }
+            if let Some((_, t)) = ms.find(&format!("{}lm_head.weight", prefix)) {
+                info.lm_head_shape = Some(t.shape.as_slice());
+            }
+            if let Some((_, t)) = ms.find(&format!("{}model.embed_tokens.weight", prefix)) {
+                info.embed_tokens_shape = Some(t.shape.as_slice());
+            }
+            if let Some((_, t)) = ms.find(&format!("{}model.layers.0.mlp.gate_proj.weight", prefix))
+            {
+                info.gate_proj_shape = Some(t.shape.as_slice());
+            }
+        }
         let cfg = QwenConfig::detect(&info);
 
         if kernels::verbose() >= 1 {
-            let variant = if cfg.dec_hidden >= 2048 { "1.7B" } else { "0.6B" };
-            let model_type = if cfg.is_aligner() { "ForcedAligner" } else { "ASR" };
+            let variant = if cfg.dec_hidden >= 2048 {
+                "1.7B"
+            } else {
+                "0.6B"
+            };
+            let model_type = if cfg.is_aligner() {
+                "ForcedAligner"
+            } else {
+                "ASR"
+            };
             eprintln!("Detected: Qwen3-{}-{}", model_type, variant);
             if cfg.is_aligner() {
-                eprintln!("  classify_num={}, timestamp_segment_time={:.0}ms",
-                          cfg.classify_num, cfg.timestamp_segment_time);
-                eprintln!("  encoder: {}d {}L, decoder: {}d {}L",
-                          cfg.enc_d_model, cfg.enc_layers, cfg.dec_hidden, cfg.dec_layers);
+                eprintln!(
+                    "  classify_num={}, timestamp_segment_time={:.0}ms",
+                    cfg.classify_num, cfg.timestamp_segment_time
+                );
+                eprintln!(
+                    "  encoder: {}d {}L, decoder: {}d {}L",
+                    cfg.enc_d_model, cfg.enc_layers, cfg.dec_hidden, cfg.dec_layers
+                );
             }
         }
 

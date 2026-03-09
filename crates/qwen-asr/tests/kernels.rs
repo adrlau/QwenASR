@@ -150,3 +150,11 @@ fn test_vec_ops() {
     let err = max_abs_err(&a_copy, &expected);
     assert!(err < 1e-4, "vec_scale_add mismatch, max_err={}", err);
 }
+
+#[test]
+fn test_thread_count_clamps_to_available_cpus() {
+    let cpus = kernels::get_num_cpus().max(1);
+    kernels::set_threads(usize::MAX);
+    assert_eq!(kernels::get_num_threads(), cpus);
+    kernels::set_threads(1);
+}
